@@ -11,7 +11,10 @@ import com.revrobotics.ResetMode;
 import com.revrobotics.spark.SparkMax;
 import com.revrobotics.spark.config.SparkMaxConfig;
 
+import edu.wpi.first.math.controller.ArmFeedforward;
+import edu.wpi.first.math.controller.ElevatorFeedforward;
 import edu.wpi.first.math.controller.ProfiledPIDController;
+import edu.wpi.first.math.controller.SimpleMotorFeedforward;
 import edu.wpi.first.wpilibj.DriverStation;
 import frc.robot.lib.PID;
 
@@ -30,7 +33,7 @@ public class Motor {
         REV_NEO,
         REV_NEO_2,
         REV_NEO_550,
-        REV_Vortex;
+        REV_Vortex, NEO;
     }
 
     private sealed interface ControlType permits ControlType._TalonFX, ControlType._SparkMax {
@@ -49,11 +52,40 @@ public class Motor {
         }
     }
 
+    public sealed interface FeedforwardType permits
+            FeedforwardType._ArmFeedforward,
+            FeedforwardType._ElevatorFeedforward,
+            FeedforwardType._SimpleMotorFeedforward {
+        record _SimpleMotorFeedforward(SimpleMotorFeedforward feedforward) implements FeedforwardType {
+            @Override
+            public String toString() {
+                return "Simple Motor Feedforward";
+            }
+        }
+
+        record _ArmFeedforward(ArmFeedforward feedforward) implements FeedforwardType {
+            @Override
+            public String toString() {
+                return "Arm Feedforward";
+            }
+        }
+
+        record _ElevatorFeedforward(ElevatorFeedforward feedforward) implements FeedforwardType {
+            @Override
+            public String toString() {
+                return "Elevator Feedforward";
+            }
+        }
+    }
+
     private ControlType m_motor;
+
+    private FeedforwardType m_feedforward;
 
     private ProfiledPIDController pidController;
 
     private Boolean PIDEnabled = false;
+    private Boolean feedforwardEnabled = false;
 
     /**
      * Construct a mostly brand agnostic motor controller.
@@ -195,6 +227,24 @@ public class Motor {
     }
 
     /**
+     * Get the velocity the motor is traveling at in rotations per second.
+     * 
+     * @return Velocity in rotations per second
+     */
+    public Double getVelocity() {
+        if (m_motor instanceof ControlType._TalonFX) {
+            TalonFX fx = ((ControlType._TalonFX) m_motor).motor();
+
+            return fx.getVelocity().getValueAsDouble();
+
+        } else {
+            SparkMax spark = ((ControlType._SparkMax) m_motor).motor();
+
+            return spark.getEncoder().getVelocity();
+        }
+    }
+
+    /**
      * Set the output of one motor to mirror another.
      * 
      * @param motor   The motor to follow
@@ -248,6 +298,52 @@ public class Motor {
     }
 
     /**
+     * Creates a new ArmFeedforward with the specified gains and sets it to apply to
+     * this motor. The period is defaulted to 20 ms.
+     *
+     * @param ks The static gain in volts.
+     * @param kg The gravity gain in volts.
+     * @param kv The velocity gain in V/(rad/s).
+     * @throws IllegalArgumentException for kv &lt; zero.
+     */
+    public void initializeArmFeedforward(double ks, double kg, double kv) {
+        m_feedforward = new Motor.FeedforwardType._ArmFeedforward(new ArmFeedforward(ks, kg, kv));
+    }
+
+    /**
+     * Creates a new ElevatorFeedforward with the specified gains and sets it to
+     * apply to this motor. Acceleration gain is defaulted to zero. The period is
+     * defaulted to 20 ms.
+     *
+     * @param ks The static gain in volts.
+     * @param kg The gravity gain in volts.
+     * @param kv The velocity gain in V/(m/s).
+     * @throws IllegalArgumentException for kv &lt; zero.
+     */
+    public void initializeElevatorFeedforward(double ks, double kg, double kv) {
+        m_feedforward = new Motor.FeedforwardType._ElevatorFeedforward(new ElevatorFeedforward(ks, kg, kv));
+    }
+
+    /**
+     * Creates a new SimpleMotorFeedforward with the specified gains and period and
+     * sets it to apply to this motor. The period is
+     * defaulted to 20 ms.
+     *
+     * <p>
+     * The units should be radians for angular systems and meters for linear
+     * systems.
+     *
+     * @param ks The static gain in volts.
+     * @param kv The velocity gain in V/(units/s).
+     * @param ka The acceleration gain in V/(units/s²).
+     * @throws IllegalArgumentException for kv &lt; zero.
+     * @throws IllegalArgumentException for ka &lt; zero.
+     */
+    public void initializeSimpleMotorFeedforward(double ks, double kg, double kv) {
+        m_feedforward = new Motor.FeedforwardType._SimpleMotorFeedforward(new SimpleMotorFeedforward(ks, kg, kv));
+    }
+
+    /**
      * Setup PID control for this motor.
      * Zeros the PID controller to the current position.
      * 
@@ -277,13 +373,32 @@ public class Motor {
     }
 
     /**
-     * Update the motor's position using PID control. Should be called every
-     * periodic tick.
+     * Update the motor's position using PID and feedforward control. Should be
+     * called every periodic tick.
      */
-    public void updatePID() {
+    public void updatePIDAndFeedforward() {
+        double out = 0;
+
         if (PIDEnabled) {
-            set(pidController.calculate(getRelativePosition()));
+            out += pidController.calculate(getRelativePosition());
         }
+        if (feedforwardEnabled) {
+            if (m_feedforward instanceof FeedforwardType._SimpleMotorFeedforward) {
+                SimpleMotorFeedforward ff = ((FeedforwardType._SimpleMotorFeedforward) m_feedforward).feedforward();
+
+                out += ff.calculate(getVelocity());
+            } else if (m_feedforward instanceof FeedforwardType._ArmFeedforward) {
+                ArmFeedforward ff = ((FeedforwardType._ArmFeedforward) m_feedforward).feedforward();
+
+                out += ff.calculate(Math.toRadians(getRelativePosition()), getVelocity());
+            } else {
+                ElevatorFeedforward ff = ((FeedforwardType._ElevatorFeedforward) m_feedforward).feedforward();
+
+                out += ff.calculate(getVelocity());
+            }
+        }
+
+        set(out);
     }
 
     /**
@@ -295,6 +410,15 @@ public class Motor {
         PIDEnabled = enabled;
 
         pidController.reset(getRelativePosition());
+    }
+
+    /**
+     * Set whether feedforward control should be enabled. Starts disabled by default.
+     * 
+     * @param enabled Should we do feedforward control?
+     */
+    public void setFeedforwardEnabled(Boolean enabled) {
+        feedforwardEnabled = enabled;
     }
 
     /**

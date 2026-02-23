@@ -8,6 +8,7 @@ import com.pathplanner.lib.auto.AutoBuilder;
 
 import dev.doglog.DogLog;
 import dev.doglog.DogLogOptions;
+import edu.wpi.first.math.controller.ArmFeedforward;
 import edu.wpi.first.math.geometry.Pose2d;
 import edu.wpi.first.math.geometry.Rotation2d;
 import edu.wpi.first.wpilibj.PowerDistribution;
@@ -18,6 +19,9 @@ import edu.wpi.first.wpilibj2.command.button.CommandXboxController;
 import frc.robot.drive.swerve.SwerveDriveCommands;
 import frc.robot.drive.swerve.SwerveDriveSubsystem;
 import frc.robot.lib.Constants;
+import frc.robot.lib.motor.Motor;
+import frc.robot.lib.motor.Motor.FeedforwardType;
+import frc.robot.lib.motor.Motor.SupportedMotorType;
 
 public class RobotContainer {
     // Create a "SendableChooser", basically just a dropdown menu that can be set in
@@ -42,6 +46,8 @@ public class RobotContainer {
         DogLog.setOptions(new DogLogOptions().withCaptureDs(true));
         // Log PDH (Power Distribution Hub) messages.
         DogLog.setPdh(new PowerDistribution());
+
+        new Motor(1, SupportedMotorType.NEO);
 
         configureBindings();
     }
