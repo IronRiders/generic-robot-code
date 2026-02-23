@@ -8,6 +8,7 @@ import com.ctre.phoenix6.signals.MotorAlignmentValue;
 import com.revrobotics.AbsoluteEncoder;
 import com.revrobotics.PersistMode;
 import com.revrobotics.ResetMode;
+import com.revrobotics.spark.SparkLimitSwitch;
 import com.revrobotics.spark.SparkMax;
 import com.revrobotics.spark.config.SparkMaxConfig;
 
@@ -78,12 +79,31 @@ public class Motor {
         }
     }
 
+    public sealed interface HomerType permits HomerType._LimitSwitchAutoHomer, HomerType._CurrentAutoHomer {
+        record _LimitSwitchAutoHomer(LimitSwitchAutoHomer homer) implements HomerType {
+            @Override
+            public String toString() {
+                return "Limit Switch Auto Homer";
+            }
+        }
+
+        record _CurrentAutoHomer(CurrentAutoHomer homer) implements HomerType {
+            @Override
+            public String toString() {
+                return "Voltage Auto Homer";
+            }
+        }
+    }
+
     private ControlType m_motor;
 
     private FeedforwardType m_feedforward;
 
     private ProfiledPIDController pidController;
 
+    private HomerType m_homer;
+
+    private Boolean hasBeenHomed = false;
     private Boolean PIDEnabled = false;
     private Boolean feedforwardEnabled = false;
 
@@ -245,6 +265,23 @@ public class Motor {
     }
 
     /**
+     * Gets the current applied to the rotors in amps.
+     * 
+     * @return The current.
+     */
+    public Double getCurrent() {
+        if (m_motor instanceof ControlType._TalonFX) {
+            TalonFX fx = ((ControlType._TalonFX) m_motor).motor();
+
+            return fx.getTorqueCurrent().getValueAsDouble();
+        } else {
+            SparkMax spark = ((ControlType._SparkMax) m_motor).motor();
+
+            return spark.getOutputCurrent();
+        }
+    }
+
+    /**
      * Set the output of one motor to mirror another.
      * 
      * @param motor   The motor to follow
@@ -253,7 +290,6 @@ public class Motor {
     public void setFollowingOther(Motor motor, boolean opposed) {
         if (motor.getType() != this.getType()) {
             DriverStation
-                    // #racialprofiling
                     .reportError(String.format(
                             "Can't follow a motor of a different type! (I am a %s, they are a %s) (if you reallllly need to you probably can, but it is not officially supported and might not work",
                             m_motor.toString(), motor.m_motor.toString()), true);
@@ -295,6 +331,8 @@ public class Motor {
             // reset the PID controller's setpoint.
             pidController.reset(0);
         }
+
+        hasBeenHomed = true;
     }
 
     /**
@@ -344,6 +382,58 @@ public class Motor {
     }
 
     /**
+     * Add a homer to this motor that will automatically move the mechanism to the
+     * rest position using the supplied current.
+     * 
+     * @param speed Speed to move during homing, -1 to 1
+     */
+    public void initializeCurrentAutohomer(Double speed) {
+        m_homer = new CurrentAutoHomer(this::getCurrent, this::set, speed).asType();
+    }
+
+    /**
+     * Add a homer to this motor that will automatically move the mechanism to the
+     * rest position using a limit switch.
+     * 
+     * @param speed Speed to move during homing, -1 to 1
+     */
+    public void initializeLimitSwitchAutohomer(Double speed, Boolean invertedLimitSwitch, Boolean forwardLimitSwitch) {
+        SparkLimitSwitch limitSwitch;
+
+        if (m_motor instanceof ControlType._TalonFX) {
+            DriverStation.reportError("TODO: Limit switch control on TalonFX", true);
+            return;
+        } else {
+            SparkMax spark = ((ControlType._SparkMax) m_motor).motor();
+            if (forwardLimitSwitch) {
+                limitSwitch = spark.getForwardLimitSwitch();
+            } else {
+                limitSwitch = spark.getReverseLimitSwitch();
+            }
+        }
+
+        m_homer = new LimitSwitchAutoHomer(() -> limitSwitch.isPressed(), invertedLimitSwitch, this::set, speed)
+                .asType();
+    }
+
+    /**
+     * Add a homer to this motor that will automatically move the mechanism to the
+     * rest position using a limit switch.
+     * 
+     * @param speed Speed to move during homing, -1 to 1
+     */
+    public void initializeLimitSwitchAutohomer(Double speed, Boolean invertedLimitSwitch,
+            SparkLimitSwitch limitSwitch) {
+        if (m_motor instanceof ControlType._TalonFX) {
+            DriverStation.reportError("TODO: Limit switch control on TalonFX", true);
+            return;
+        }
+
+        m_homer = new LimitSwitchAutoHomer(() -> limitSwitch.isPressed(), invertedLimitSwitch, this::set, speed)
+                .asType();
+    }
+
+    /**
      * Setup PID control for this motor.
      * Zeros the PID controller to the current position.
      * 
@@ -373,10 +463,30 @@ public class Motor {
     }
 
     /**
-     * Update the motor's position using PID and feedforward control. Should be
+     * Update the motor's state. Should be
      * called every periodic tick.
+     * 
+     * Will only have effect after the motor is said to be homed.
      */
-    public void updatePIDAndFeedforward() {
+    public void update() {
+        if (!hasBeenHomed) {
+            if (m_homer instanceof HomerType._CurrentAutoHomer) {
+                CurrentAutoHomer homer = ((HomerType._CurrentAutoHomer) m_homer).homer();
+
+                homer.update();
+
+                hasBeenHomed = homer.isHomed();
+            } else {
+                LimitSwitchAutoHomer homer = ((HomerType._LimitSwitchAutoHomer) m_homer).homer();
+
+                homer.update();
+
+                hasBeenHomed = homer.isHomed();
+            }
+
+            return;
+        }
+
         double out = 0;
 
         if (PIDEnabled) {
@@ -398,7 +508,9 @@ public class Motor {
             }
         }
 
-        set(out);
+        if (PIDEnabled || feedforwardEnabled) {
+            set(out);
+        }
     }
 
     /**
@@ -413,7 +525,8 @@ public class Motor {
     }
 
     /**
-     * Set whether feedforward control should be enabled. Starts disabled by default.
+     * Set whether feedforward control should be enabled. Starts disabled by
+     * default.
      * 
      * @param enabled Should we do feedforward control?
      */
